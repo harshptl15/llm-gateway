@@ -1,0 +1,8 @@
+fastapi==0.115.*
+uvicorn[standard]==0.32.*
+asyncpg==0.30.*
+pgvector==0.3.*
+redis==5.2.*
+anthropic>=0.75
+sentence-transformers==3.3.*
+numpy>=1.26,<3
