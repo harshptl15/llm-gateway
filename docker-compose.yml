@@ -1,4 +1,17 @@
 services:
+  gateway:
+    build: .
+    ports: ["8000:8000"]
+    env_file:
+      - path: .env          # ANTHROPIC_API_KEY, GATEWAY_API_KEYS, threshold, ...
+        required: false     # without it the gateway still starts (requests to Anthropic will 502)
+    environment:
+      DATABASE_URL: postgresql://gateway:gateway@postgres:5432/gateway
+      REDIS_URL: redis://redis:6379/0
+    depends_on:             # wait for healthy, not just "container started"
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
   postgres:
     image: pgvector/pgvector:pg16      # stock Postgres 16 with the pgvector extension built in
     environment:
