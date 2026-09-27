@@ -27,7 +27,7 @@ class Settings:
     )
 
     # Cosine similarity at or above which a cached answer is served.
-    similarity_threshold: float = float(os.getenv("CACHE_SIMILARITY_THRESHOLD", "0.90"))
+    similarity_threshold: float = float(os.getenv("CACHE_SIMILARITY_THRESHOLD", "0.95"))
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
     provider: str = os.getenv("PROVIDER", "anthropic")  # "anthropic" | "fake"
