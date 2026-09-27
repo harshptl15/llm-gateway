@@ -58,8 +58,9 @@ def create_app(settings: Settings = default_settings, *, provider: Provider | No
     app = FastAPI(title="LLM Gateway", lifespan=lifespan)
 
     @app.get("/health")
-    async def health():
-        return {"ok": True}
+    async def health(request: Request):
+        s = request.app.state.settings
+        return {"ok": True, "model": s.model, "similarity_threshold": s.similarity_threshold}
 
     @app.post("/v1/complete", response_model=CompleteResponse)
     async def complete(body: CompleteRequest, request: Request, response: Response,
@@ -103,10 +104,11 @@ def create_app(settings: Settings = default_settings, *, provider: Provider | No
 
         # Step 5: per-key usage ledger.
         await state.pool.execute(
-            """INSERT INTO usage_log (key_id, model, cache_hit, similarity, input_tokens, output_tokens,
-                                      cost_usd, saved_usd, latency_ms)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)""",
-            key_id, model, hit is not None, similarity, in_tok, out_tok, cost, saved, latency_ms,
+            """INSERT INTO usage_log (key_id, model, cache_hit, cache_entry_id, similarity, input_tokens,
+                                      output_tokens, cost_usd, saved_usd, latency_ms)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)""",
+            key_id, model, hit is not None, hit.id if hit else None, similarity, in_tok, out_tok,
+            cost, saved, latency_ms,
         )
 
         response.headers["X-Cache"] = "HIT" if hit else "MISS"

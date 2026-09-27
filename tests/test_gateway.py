@@ -112,6 +112,7 @@ def test_usage_logged_with_cost_on_miss_and_savings_on_hit(make_client, settings
     assert [r["cache_hit"] for r in rows] == [False, True]
     assert all(r["key_id"] == "tester" for r in rows)
     assert rows[0]["input_tokens"] == 3 and rows[1]["input_tokens"] == 0
+    assert rows[0]["cache_entry_id"] is None and rows[1]["cache_entry_id"] is not None
     assert float(rows[1]["saved_usd"]) == pytest.approx(expected_cost)
 
 

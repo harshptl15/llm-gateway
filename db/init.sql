@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS usage_log (
     key_id        TEXT        NOT NULL,
     model         TEXT        NOT NULL,
     cache_hit     BOOLEAN     NOT NULL,
+    cache_entry_id BIGINT,                -- which semantic_cache row was served (NULL on a miss)
     similarity    REAL,                   -- best match similarity (NULL if cache was empty)
     input_tokens  INT         NOT NULL,   -- tokens actually billed by the provider (0 on a hit)
     output_tokens INT         NOT NULL,
