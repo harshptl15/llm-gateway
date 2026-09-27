@@ -48,6 +48,8 @@ def create_app(settings: Settings = default_settings, *, provider: Provider | No
         app.state.limiter = RateLimiter(redis_client, settings.rate_limit_per_minute, settings.daily_token_quota)
         # Loading the embedding model takes ~1-2s; do it once at startup, not per request.
         app.state.embedder = embedder or SentenceTransformerEmbedder(settings.embedding_model)
+        # torch initializes lazily; without this the first real request pays ~100ms extra.
+        app.state.embedder.embed("warmup")
         app.state.provider = provider or make_provider(settings.provider)
         yield
         await pool.close()

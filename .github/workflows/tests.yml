@@ -6,7 +6,7 @@ on:
 
 jobs:
   pytest:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned: ubuntu-latest moves to 26 on 2026-10-19
 
     # Same images as docker-compose.yml, run as sidecar containers for the job.
     # Tests hit real Postgres+pgvector and Redis; only the LLM provider is faked,
