@@ -4,9 +4,15 @@ Postgres and Redis are REAL (from docker-compose locally, service containers in
 CI) — the pgvector query and the Redis pipeline are exactly the code most likely
 to be wrong, so mocking them would test nothing. Only the LLM provider is faked,
 because it costs money and needs the network.
+
+Tests get their OWN database (gateway_test, recreated each session) and Redis DB 1,
+because every test wipes its tables — pointing them at the dev database would
+delete the data the running gateway serves.
 """
+import asyncio
 import dataclasses
 import os
+from pathlib import Path
 
 import asyncpg
 import numpy as np
@@ -17,6 +23,11 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.main import create_app
 from app.providers.fake import FakeProvider
+
+TEST_DB = "gateway_test"
+TEST_DB_URL = os.getenv("TEST_DATABASE_URL", f"postgresql://gateway:gateway@localhost:5432/{TEST_DB}")
+TEST_REDIS_URL = os.getenv("TEST_REDIS_URL", "redis://localhost:6379/1")
+SCHEMA = Path(__file__).parent.parent / "db" / "init.sql"
 
 API_KEY = "test-key"
 HEADERS = {"x-api-key": API_KEY}
@@ -57,11 +68,27 @@ def vec_with_similarity(sim: float) -> list[float]:
     return [sim, float(np.sqrt(1 - sim**2))]
 
 
+@pytest.fixture(scope="session", autouse=True)
+def test_database():
+    """Drop and recreate the test database with the current schema, once per session."""
+
+    async def create():
+        admin = await asyncpg.connect(TEST_DB_URL.rsplit("/", 1)[0] + "/postgres")
+        await admin.execute(f"DROP DATABASE IF EXISTS {TEST_DB} WITH (FORCE)")
+        await admin.execute(f"CREATE DATABASE {TEST_DB}")
+        await admin.close()
+        conn = await asyncpg.connect(TEST_DB_URL)
+        await conn.execute(SCHEMA.read_text())
+        await conn.close()
+
+    asyncio.run(create())
+
+
 @pytest.fixture
 def settings() -> Settings:
     return Settings(
-        database_url=os.getenv("DATABASE_URL", "postgresql://gateway:gateway@localhost:5432/gateway"),
-        redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+        database_url=TEST_DB_URL,
+        redis_url=TEST_REDIS_URL,
         api_keys={API_KEY: "tester"},
         similarity_threshold=0.90,
         provider="fake",
@@ -79,8 +106,6 @@ def clean_state(settings):
         conn = await asyncpg.connect(settings.database_url)
         await conn.execute("TRUNCATE semantic_cache, usage_log")
         await conn.close()
-
-    import asyncio
 
     asyncio.run(truncate())
     redis.Redis.from_url(settings.redis_url).flushdb()
@@ -111,8 +136,6 @@ def make_client(settings):
 
 
 def ledger(settings) -> list[dict]:
-    import asyncio
-
     async def fetch():
         conn = await asyncpg.connect(settings.database_url)
         rows = await conn.fetch("SELECT * FROM usage_log ORDER BY id")

@@ -51,8 +51,6 @@ jobs:
           path: ~/.cache/huggingface
           key: hf-all-MiniLM-L6-v2
 
-      - name: Apply schema
-        run: psql postgresql://gateway:gateway@localhost:5432/gateway -v ON_ERROR_STOP=1 -f db/init.sql
-
+      # The fixtures create a fresh gateway_test database from db/init.sql.
       - name: Run tests
         run: pytest -q
