@@ -29,8 +29,12 @@ def embed_all(texts: list[str], model: str = "sentence-transformers/all-MiniLM-L
     return dict(zip(unique, vecs.astype(np.float32)))
 
 
-def simulate(stream: list[Request], vecs: dict[str, np.ndarray], threshold: float):
-    """Replay the gateway's cache policy. Returns one (hit, similarity, matched_text) per request."""
+def simulate(stream: list[Request], vecs: dict[str, np.ndarray], threshold: float, verify=None):
+    """Replay the gateway's cache policy. Returns one (hit, similarity, matched_text) per request.
+
+    `verify(query, candidate) -> bool`, if given, is a second-stage check that must
+    also pass before a candidate above `threshold` is served (retrieve-then-verify).
+    """
     dim = next(iter(vecs.values())).shape[0]
     cache = np.empty((len(stream), dim), dtype=np.float32)
     cached_texts: list[str] = []
@@ -42,7 +46,7 @@ def simulate(stream: list[Request], vecs: dict[str, np.ndarray], threshold: floa
             sims = cache[:n] @ q                       # unit vectors: dot product == cosine similarity
             j = int(np.argmax(sims))
             best = float(sims[j])
-            if best >= threshold:
+            if best >= threshold and (verify is None or verify(req.text, cached_texts[j])):
                 out.append((True, best, cached_texts[j]))
                 continue                               # hit: nothing is stored
         cache[n] = q                                   # miss: provider answers, answer is stored

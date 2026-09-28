@@ -42,3 +42,12 @@ Measured inside the gateway, from request received to response ready (`usage_log
 | 0.97 | 3.5% | 7.0% – 14.1% | 13.6% |
 | 0.98 | 2.6% | 4.8% – 12.4% | 9.5% |
 | 0.99 | 1.7% | 1.5% – 6.1% | 5.3% |
+
+### Improving precision (offline, same 4,000 requests)
+
+| Setup | Hit rate | False-hit rate (labeled – conservative) | Est. false-hit rate* | Paraphrase recall |
+|---|---:|---:|---:|---:|
+| MiniLM only (shipped) (cos ≥ 0.95) | 5.9% | 11.4% – 23.2% | ~14% | 21.8% |
+| bge-small embedder only (cos ≥ 0.95) | 8.0% | 11.6% – 24.8% | — | 29.9% |
+| MiniLM → general cross-encoder (STS-B) (cos ≥ 0.90, verifier ≥ 0.9) | 7.4% | 10.1% – 22.8% | — | 28.4% |
+| MiniLM → duplicate-question cross-encoder (Quora) (cos ≥ 0.85, verifier ≥ 0.9) | 12.9% | 5.0% – 24.7% | ~9% | 50.1% |

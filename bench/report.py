@@ -47,6 +47,44 @@ def main():
         print(f"| {b}{r['threshold']:.2f}{b} | {r['hit_rate']:.1%} | "
               f"{r['false_hit_rate_low']:.1%} – {r['false_hit_rate_high']:.1%} | {r['dup_recall']:.1%} |")
 
+    print("\n### Improving precision (offline, same 4,000 requests)\n")
+    improve_table()
+
+
+# Manual review of a random 15 unlabeled hits per config (by Claude while building this,
+# not by human annotators): 12 of 15 were genuine paraphrases in BOTH configs.
+SPOTCHECK_UNLABELED_CORRECT = 12 / 15
+IMPROVE_ROWS = [  # (config, retrieval threshold, verify threshold) -> the rows worth showing
+    ("minilm (baseline)", 0.95, None),
+    ("bge-small", 0.95, None),
+    ("minilm + verify[stsb]", 0.90, 0.9),
+    ("minilm + verify[quora]", 0.85, 0.9),
+]
+LABELS = {
+    "minilm (baseline)": "MiniLM only (shipped)",
+    "bge-small": "bge-small embedder only",
+    "minilm + verify[stsb]": "MiniLM → general cross-encoder (STS-B)",
+    "minilm + verify[quora]": "MiniLM → duplicate-question cross-encoder (Quora)",
+}
+SPOTCHECKED = {("minilm (baseline)", 0.95), ("minilm + verify[quora]", 0.85)}
+
+
+def improve_table():
+    rows = json.loads((RESULTS / "improve.json").read_text())["rows"]
+    print("| Setup | Hit rate | False-hit rate (labeled – conservative) | Est. false-hit rate* | Paraphrase recall |")
+    print("|---|---:|---:|---:|---:|")
+    for cfg, rt, vt in IMPROVE_ROWS:
+        r = next(x for x in rows if x["config"] == cfg and x["retrieval_threshold"] == rt
+                 and x.get("verify_threshold") == vt)
+        est = "—"
+        if (cfg, rt) in SPOTCHECKED:
+            labeled_wrong = r["false_hits"] - r["false_hits_unlabeled"]
+            est_wrong = labeled_wrong + r["false_hits_unlabeled"] * (1 - SPOTCHECK_UNLABELED_CORRECT)
+            est = f"~{est_wrong / r['hits']:.0%}"
+        thr = f"cos ≥ {rt:.2f}" + (f", verifier ≥ {vt}" if vt else "")
+        print(f"| {LABELS[cfg]} ({thr}) | {r['hit_rate']:.1%} | {r['false_hit_rate_low']:.1%} – "
+              f"{r['false_hit_rate_high']:.1%} | {est} | {r['dup_recall']:.1%} |")
+
 
 if __name__ == "__main__":
     main()

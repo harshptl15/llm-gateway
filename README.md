@@ -17,6 +17,9 @@ human-labeled ground truth.
   default) **17–31% of cache hits served an answer to a different question**, e.g. *"How do I become an
   introvert?"* matched *"How do I become **less of** an introvert?"* at 0.95. The gateway ships at **0.95**
   (11–23% false hits, catching 22% of paraphrases): precision over hit rate.
+- **A second-stage check fixes much of it.** Offline, a cross-encoder that verifies each candidate before it's
+  served **more than doubled the hit rate (5.9% → 12.9%) while cutting estimated wrong answers from ~14% to ~9%**.
+  See [Improving precision](#improving-precision-retrieve-then-verify) for the method and caveats.
 - **Savings depend on how repetitive your traffic is.** On QQP, which has no exact repeats, the cache served 3.4% of
   live requests. Treat that as a floor for paraphrase-only traffic, not a typical number.
 - **The offline sweep is trustworthy:** it matched the live gateway on **384 / 384** hit/miss decisions, so the
@@ -72,6 +75,40 @@ Measured inside the gateway, from request received to response ready (`usage_log
 Raw numbers: [`results/live.json`](results/live.json), [`results/sweep.json`](results/sweep.json). The tables
 above are generated from them by [`bench/report.py`](bench/report.py).
 
+
+## Improving precision: retrieve, then verify
+
+The false hits come from how the matcher works. MiniLM is a *bi-encoder*: it embeds each question **on its own**
+and compares the vectors, so two questions about the same topic land close together even when one small word
+flips the meaning. A *cross-encoder* reads **both questions together** and can attend to exactly that word. It's
+too slow to run against every cached prompt, but cheap on the single nearest candidate the vector search already
+found. So the experiment ([`bench/improve.py`](bench/improve.py)) **lowers the vector threshold to find more
+candidates, then requires a cross-encoder to approve each one** before it's served:
+
+| Setup | Hit rate | False-hit rate (labeled – conservative) | Est. false-hit rate* | Paraphrase recall |
+|---|---:|---:|---:|---:|
+| MiniLM only (shipped) (cos ≥ 0.95) | 5.9% | 11.4% – 23.2% | ~14% | 21.8% |
+| bge-small embedder only (cos ≥ 0.95) | 8.0% | 11.6% – 24.8% | — | 29.9% |
+| MiniLM → general cross-encoder (STS-B) (cos ≥ 0.90, verifier ≥ 0.9) | 7.4% | 10.1% – 22.8% | — | 28.4% |
+| MiniLM → duplicate-question cross-encoder (Quora) (cos ≥ 0.85, verifier ≥ 0.9) | 12.9% | 5.0% – 24.7% | ~9% | 50.1% |
+
+\* Labeled false hits plus an estimate for hits QQP never labeled, from a manual review of a random 15 unlabeled
+hits per setup (12 of 15 were genuine paraphrases in both). That review was done by Claude while building this,
+not by human annotators, and 15 is a small sample.
+
+- **A duplicate-question cross-encoder more than doubles the hit rate (5.9% → 12.9%) while cutting estimated wrong
+  answers from ~14% to ~9%.** It catches half of all true paraphrases, vs. about a fifth today. Verification costs
+  ~9 ms per candidate on a laptop CPU and only runs on requests that have one.
+- **Caveat:** that cross-encoder was trained on Quora duplicate questions, so this benchmark is in-domain for it
+  and its numbers here are optimistic. The general-purpose cross-encoder (never trained on Quora) and a better
+  embedder each give a smaller, cleaner gain: about 25–35% more hits at the same error rate.
+- **What still gets through: entity swaps.** *"Why is salt water taffy imported in the Bahamas?"* was approved as
+  a match for *"…imported in France?"*. Both models see the same sentence with a different noun. Catching that
+  would need something like entity-aware checks.
+- This is an **offline result**. The gateway still ships the single-stage design; wiring the verifier in (as an
+  optional stage behind a config flag) and confirming it on a live run is the next step.
+
+The full 35-configuration grid is in [`results/improve.json`](results/improve.json).
 
 ## How it works
 
@@ -160,8 +197,8 @@ process, which is why the latency table uses gateway-side timing for both rows.
 ## Known limitations
 
 - **False hits are the real problem.** Topic similarity isn't answer equivalence: "How do I become an introvert?"
-  matched "How do I become *less of* an introvert?" at 0.95. Next steps would be a stronger embedding model or a
-  verification step (a cross-encoder re-scoring the top match) before serving a hit.
+  matched "How do I become *less of* an introvert?" at 0.95. A cross-encoder verification stage measurably helps
+  (see [Improving precision](#improving-precision-retrieve-then-verify)) but isn't wired into the gateway yet.
 - **Cache stampede.** Two identical prompts arriving at the same moment both miss and both call the provider.
   The fix is request coalescing ("single-flight").
 - **`max_tokens` is not part of the cache key**, so a request can receive a cached answer longer than it asked for.
@@ -200,5 +237,6 @@ mkdir -p bench/data && curl -L -o bench/data/qqp_validation.parquet \
   https://huggingface.co/datasets/nyu-mll/glue/resolve/main/qqp/validation-00000-of-00001.parquet
 python -m bench.sweep --pairs 2000   # free, ~10 s
 python -m bench.live --pairs 300     # real API calls: prints a cost estimate and asks first
+python -m bench.improve --pairs 2000 # free, a few minutes of CPU; downloads two cross-encoders (~650MB)
 python -m bench.report               # the tables above, from results/*.json
 ```
