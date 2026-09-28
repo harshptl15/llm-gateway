@@ -1,10 +1,13 @@
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Literal
 
 import asyncpg
 import redis.asyncio as redis
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse
 from pgvector.asyncpg import register_vector
 from pydantic import BaseModel, Field
 
@@ -15,6 +18,8 @@ from .embeddings import Embedder, SentenceTransformerEmbedder
 from .pricing import cost_usd
 from .providers import Provider, ProviderError, make_provider
 from .ratelimit import RateLimited, RateLimiter
+
+STATIC = Path(__file__).parent / "static"
 
 
 class CompleteRequest(BaseModel):
@@ -56,6 +61,47 @@ def create_app(settings: Settings = default_settings, *, provider: Provider | No
         await redis_client.aclose()
 
     app = FastAPI(title="LLM Gateway", lifespan=lifespan)
+
+    @app.get("/", include_in_schema=False)
+    @app.get("/dashboard", include_in_schema=False)
+    async def dashboard():
+        return FileResponse(STATIC / "index.html")
+
+    @app.get("/v1/stats")
+    async def stats(request: Request, window: Literal["hour", "day"] = "hour",
+                    key_id: str = Depends(authenticate)):
+        """All-time totals plus a per-minute (hour window) or per-hour (day window)
+        series of hits vs misses, for the dashboard. Covers all keys' traffic."""
+        state = request.app.state
+        # Only these two fixed strings ever reach the SQL below (window is a Literal).
+        bucket, span = ("minute", "1 hour") if window == "hour" else ("hour", "24 hours")
+        totals = await state.pool.fetchrow(
+            """SELECT count(*) AS requests,
+                      count(*) FILTER (WHERE cache_hit) AS hits,
+                      coalesce(sum(cost_usd), 0)::float AS spent_usd,
+                      coalesce(sum(saved_usd), 0)::float AS saved_usd,
+                      percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE cache_hit) AS hit_p50_ms,
+                      percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE NOT cache_hit) AS miss_p50_ms
+               FROM usage_log"""
+        )
+        # generate_series makes a row for every bucket, so empty minutes show as 0
+        # instead of silently disappearing from the chart.
+        series = await state.pool.fetch(
+            f"""WITH buckets AS (
+                    SELECT generate_series(date_trunc('{bucket}', now()) - interval '{span}' + interval '1 {bucket}',
+                                           date_trunc('{bucket}', now()), interval '1 {bucket}') AS t)
+                SELECT b.t, count(u.id) FILTER (WHERE u.cache_hit) AS hits,
+                            count(u.id) FILTER (WHERE NOT u.cache_hit) AS misses
+                FROM buckets b LEFT JOIN usage_log u ON date_trunc('{bucket}', u.created_at) = b.t
+                GROUP BY b.t ORDER BY b.t"""
+        )
+        return {
+            **dict(totals),
+            "model": state.settings.model,
+            "similarity_threshold": state.settings.similarity_threshold,
+            "window": window,
+            "series": [{"t": r["t"].isoformat(), "hits": r["hits"], "misses": r["misses"]} for r in series],
+        }
 
     @app.get("/health")
     async def health(request: Request):

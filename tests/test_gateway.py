@@ -160,3 +160,26 @@ def test_request_validation(make_client):
     client, _ = make_client()
     assert ask(client, "").status_code == 422
     assert ask(client, "hi", max_tokens=0).status_code == 422
+
+
+# ---------------------------------------------------------------- dashboard
+
+def test_stats_requires_key_and_reports_totals(make_client):
+    client, _ = make_client()
+    assert client.get("/v1/stats").status_code == 401
+    ask(client, "one two three")                     # miss
+    ask(client, "one two three")                     # hit
+    s = client.get("/v1/stats", headers=HEADERS).json()
+    assert (s["requests"], s["hits"]) == (2, 1)
+    assert s["saved_usd"] == pytest.approx(cost_usd("claude-haiku-4-5", 3, 20))
+    assert len(s["series"]) == 60                    # one bucket per minute, empty ones included
+    assert sum(b["hits"] + b["misses"] for b in s["series"]) == 2
+    assert len(client.get("/v1/stats?window=day", headers=HEADERS).json()["series"]) == 24
+    assert client.get("/v1/stats?window=week", headers=HEADERS).status_code == 422
+
+
+def test_dashboard_page_is_served(make_client):
+    client, _ = make_client()
+    for path in ("/", "/dashboard"):
+        r = client.get(path)
+        assert r.status_code == 200 and "text/html" in r.headers["content-type"]
