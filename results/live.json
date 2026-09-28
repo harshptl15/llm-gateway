@@ -1,0 +1,55 @@
+{
+  "model": "claude-haiku-4-5",
+  "threshold": 0.95,
+  "pairs": 300,
+  "max_tokens": 150,
+  "stream_requests": 600,
+  "requests": 384,
+  "stopped_at": 384,
+  "errors": null,
+  "hits": 13,
+  "hit_rate": 0.033854166666666664,
+  "predicted_hit_rate_full_stream": 0.04,
+  "false_hit_rate_low": 0.23076923076923078,
+  "false_hit_rate_high": 0.23076923076923078,
+  "hit_verdicts": {
+    "correct": 10,
+    "wrong": 3,
+    "unlabeled": 0
+  },
+  "sim_live_agreement": 1.0,
+  "latency_client_ms": {
+    "uncached": {
+      "n": 0
+    },
+    "cached_replay": {
+      "n": 384,
+      "p50": 28.2,
+      "p95": 41.1,
+      "p99": 49.3
+    }
+  },
+  "latency_server_ms": {
+    "uncached": {
+      "n": 371,
+      "p50": 2326.8,
+      "p95": 2750.4,
+      "p99": 3213.2
+    },
+    "cached_replay": {
+      "n": 384,
+      "p50": 22.9,
+      "p95": 33.7,
+      "p99": 40.1
+    }
+  },
+  "client_minus_server_ms_p50": 4.88,
+  "cost_usd": {
+    "spent": 0.2784,
+    "saved": 0.0095,
+    "saved_pct_of_uncached_spend": 0.03309938149198995,
+    "avg_cost_per_miss": 0.00075,
+    "projected_saved_per_1M_requests": 25.41
+  },
+  "replay_misses": 0
+}

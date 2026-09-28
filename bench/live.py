@@ -8,6 +8,7 @@ Pass 2 (replay, free): the same queries again. Everything is cached by now, so
     Replay hits are NOT counted in hit rate or savings.
 
     python -m bench.live --pairs 300          # prints an estimate and asks before spending
+    python -m bench.live --pairs 300 --analyze-existing   # recover an interrupted run; replay is free
 """
 import argparse
 import asyncio
@@ -75,6 +76,8 @@ def main():
     ap.add_argument("--provider-rpm", type=float, default=45, help="cap on provider calls/min (Anthropic tier 1 = 50)")
     ap.add_argument("--replay-rps", type=float, default=8, help="replay pacing; stays under the gateway's 600/min limit")
     ap.add_argument("--yes", action="store_true", help="skip the cost confirmation prompt")
+    ap.add_argument("--analyze-existing", action="store_true",
+                    help="don't send pass 1; recover it from usage_log (e.g. after the run was interrupted)")
     args = ap.parse_args()
 
     client = httpx.Client(base_url=args.url, headers={"x-api-key": args.key}, timeout=120)
@@ -92,90 +95,110 @@ def main():
     print(f"gateway: model={model} threshold={threshold}")
     print(f"{len(stream)} requests, ~{est_misses} predicted misses -> est. cost <= ${est_cost:.2f}, "
           f"~{est_misses / args.provider_rpm:.0f} min (provider calls capped at {args.provider_rpm:.0f}/min)")
-    if not args.yes and input("proceed? [y/N] ").strip().lower() != "y":
-        return
+    if args.analyze_existing:
+        # Recover an interrupted run from the gateway's own ledger instead of
+        # re-spending. Rows are in request order; once the provider started failing,
+        # only cache hits still got logged, so the clean prefix ends at the last miss.
+        ledger = asyncio.run(read_ledger(args.key_id))
+        k = max(i for i, r in enumerate(ledger) if not r["cache_hit"]) + 1
+        measured, led1, client1 = stream[:k], ledger[:k], None  # client timings weren't saved
+        stopped_at, errors, skip = k, None, len(ledger)
+        print(f"recovered the first {k} requests from usage_log ({len(ledger) - k} later rows ignored)")
+    else:
+        if not args.yes and input("proceed? [y/N] ").strip().lower() != "y":
+            return
+        asyncio.run(reset_db())
+        redis.Redis.from_url(REDIS_URL).flushdb()
 
-    asyncio.run(reset_db())
-    redis.Redis.from_url(REDIS_URL).flushdb()
+        # ---- pass 1: measured
+        pass1, fails = [], 0
+        min_gap = 60.0 / args.provider_rpm
+        t_start = time.time()
+        for i, req in enumerate(stream):
+            rec = send(client, req.text, args.max_tokens)
+            pass1.append(rec)
+            fails = fails + 1 if rec["status"] != 200 else 0
+            if fails >= 10:  # e.g. provider out of credit: stop instead of blasting through the stream
+                print(f"  aborting at request {i + 1}: 10 consecutive errors (last status {rec['status']})")
+                break
+            if rec["status"] == 200 and not rec["cached"]:
+                time.sleep(max(0.0, min_gap - rec["ms"] / 1000))  # pacing happens OUTSIDE the timed region
+            if (i + 1) % 50 == 0:
+                hits = sum(bool(r["cached"]) for r in pass1)
+                print(f"  pass 1: {i + 1}/{len(stream)}  hits={hits}  elapsed={time.time() - t_start:.0f}s", flush=True)
+        # Failed requests raise before logging, so ledger rows line up with the 200s.
+        ok = [(req, rec) for req, rec in zip(stream, pass1) if rec["status"] == 200]
+        measured, client1 = [req for req, _ in ok], [rec["ms"] for _, rec in ok]
+        led1 = asyncio.run(read_ledger(args.key_id))
+        assert len(led1) == len(measured), (len(led1), len(measured))
+        stopped_at = len(pass1) if len(pass1) < len(stream) else None
+        errors, skip = len(pass1) - len(ok), len(led1)
 
-    # ---- pass 1: measured
-    pass1 = []
-    min_gap = 60.0 / args.provider_rpm
-    t_start = time.time()
-    for i, req in enumerate(stream):
-        rec = send(client, req.text, args.max_tokens)
-        pass1.append(rec)
-        if rec["status"] == 200 and not rec["cached"]:
-            time.sleep(max(0.0, min_gap - rec["ms"] / 1000))  # pacing happens OUTSIDE the timed region
-        if (i + 1) % 50 == 0:
-            hits = sum(bool(r["cached"]) for r in pass1)
-            print(f"  pass 1: {i + 1}/{len(stream)}  hits={hits}  elapsed={time.time() - t_start:.0f}s", flush=True)
-
-    # ---- pass 2: replay for cache-hit latency samples
+    # ---- pass 2: replay the measured requests for cache-hit latency samples (free)
     pass2 = []
-    for req in stream:
+    for req in measured:
         pass2.append(send(client, req.text, args.max_tokens))
         time.sleep(1.0 / args.replay_rps)
-    print(f"  pass 2 (replay): {sum(bool(r['cached']) for r in pass2)}/{len(pass2)} hits")
-
-    # ---- join with the gateway's own ledger (rows are in request order; failed
-    #      requests raise before logging, so only status-200 requests have rows)
-    ledger = asyncio.run(read_ledger(args.key_id))
-    ok1 = [(req, rec) for req, rec in zip(stream, pass1) if rec["status"] == 200]
     ok2 = [rec for rec in pass2 if rec["status"] == 200]
-    assert len(ledger) == len(ok1) + len(ok2), (len(ledger), len(ok1), len(ok2))
-    led1, led2 = ledger[: len(ok1)], ledger[len(ok1):]
+    led2 = asyncio.run(read_ledger(args.key_id))[skip:]
+    assert len(led2) == len(ok2), (len(led2), len(ok2))
+    print(f"  pass 2 (replay): {sum(bool(r['cached']) for r in ok2)}/{len(pass2)} hits")
 
     verdicts = {"correct": 0, "wrong": 0, "unlabeled": 0}
-    for (req, _), row in zip(ok1, led1):
+    for req, row in zip(measured, led1):
         if row["cache_hit"]:
             verdicts[qqp.judge(req.text, row["matched"])] += 1
     hits = sum(r["cache_hit"] for r in led1)
 
     # Does the live gateway (HNSW, approximate) decide the same as the exact simulation?
     pred_by_idx = {id(req): hit for req, (hit, _, _) in zip(stream, predicted)}
-    agree = sum(pred_by_idx[id(req)] == row["cache_hit"] for (req, _), row in zip(ok1, led1))
+    agree = sum(pred_by_idx[id(req)] == row["cache_hit"] for req, row in zip(measured, led1))
 
     spent = float(sum(r["cost_usd"] for r in led1))
     saved = float(sum(r["saved_usd"] for r in led1))
     miss_rows = [r for r in led1 if not r["cache_hit"]]
     avg_miss_cost = spent / len(miss_rows) if miss_rows else 0.0
+    replay_pairs = [(rec["ms"], row["latency_ms"]) for rec, row in zip(ok2, led2) if row["cache_hit"]]
 
     results = {
         "model": model,
         "threshold": threshold,
         "pairs": args.pairs,
         "max_tokens": args.max_tokens,
-        "requests": len(stream),
-        "errors": len(stream) - len(ok1),
+        "stream_requests": len(stream),
+        "requests": len(measured),
+        "stopped_at": stopped_at,
+        "errors": errors,
         "hits": hits,
-        "hit_rate": hits / len(ok1),
+        "hit_rate": hits / len(measured),
+        "predicted_hit_rate_full_stream": sum(h for h, _, _ in predicted) / len(stream),
         "false_hit_rate_low": verdicts["wrong"] / hits if hits else 0.0,
         "false_hit_rate_high": (verdicts["wrong"] + verdicts["unlabeled"]) / hits if hits else 0.0,
         "hit_verdicts": verdicts,
-        "sim_live_agreement": agree / len(ok1),
+        "sim_live_agreement": agree / len(measured),
         "latency_client_ms": {
-            "uncached": pct([rec["ms"] for (_, rec), row in zip(ok1, led1) if not row["cache_hit"]]),
-            "cached_pass1": pct([rec["ms"] for (_, rec), row in zip(ok1, led1) if row["cache_hit"]]),
-            "cached_replay": pct([rec["ms"] for rec, row in zip(ok2, led2) if row["cache_hit"]]),
+            "uncached": pct([ms for ms, row in zip(client1, led1) if not row["cache_hit"]]) if client1 else {"n": 0},
+            "cached_replay": pct([c for c, _ in replay_pairs]),
         },
         "latency_server_ms": {
             "uncached": pct([r["latency_ms"] for r in led1 if not r["cache_hit"]]),
-            "cached_replay": pct([r["latency_ms"] for r in led2 if r["cache_hit"]]),
+            "cached_replay": pct([s for _, s in replay_pairs]),
         },
+        # HTTP + serialization overhead on localhost: client-side minus server-side, same requests.
+        "client_minus_server_ms_p50": round(float(np.median([c - s for c, s in replay_pairs])), 2) if replay_pairs else None,
         "cost_usd": {
             "spent": round(spent, 4),
             "saved": round(saved, 4),
             "saved_pct_of_uncached_spend": saved / (spent + saved) if spent + saved else 0.0,
             "avg_cost_per_miss": round(avg_miss_cost, 6),
-            "projected_saved_per_1M_requests": round(1e6 * (hits / len(ok1)) * avg_miss_cost, 2),
+            "projected_saved_per_1M_requests": round(1e6 * (hits / len(measured)) * avg_miss_cost, 2),
         },
-        "replay_misses": sum(not r["cache_hit"] for r in led2),
+        "replay_misses": sum(not r["cache_hit"] for r in led2) + (len(pass2) - len(ok2)),
     }
 
     RESULTS.mkdir(exist_ok=True)
     (RESULTS / "live.json").write_text(json.dumps(results, indent=2))
-    RAW.write_text(json.dumps({"pass1": pass1, "pass2": pass2}, indent=0))
+    RAW.write_text(json.dumps({"pass2": pass2}, indent=0))
     print(json.dumps(results, indent=2))
 
 
